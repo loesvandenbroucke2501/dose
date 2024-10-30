@@ -3,10 +3,7 @@ import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
 import pydicom
-import scipy.ndimage
 from scipy.signal import fftconvolve
-import math
-from scipy.interpolate import RegularGridInterpolator
 
 import sys
 sys.path.append('/uz/data/radiotherapie/Shared/Data/Liesbeth_Vdw/phd_projects/general/dicomTONifty')
@@ -14,116 +11,76 @@ from DICOMtoNIFTI.Read_RTDose import RTDoseVolume
 from DICOMtoNIFTI.reformat import Reformatter3DTo3D
 from DICOMtoNIFTI.Read_Fluencetxt import FluenceHeader
 from DICOMtoNIFTI.preprocessing_gantryrotation import ImageRotator2D
-
-fluence = nib.load('/uz/data/radiotherapie/Shared/Data/LoesVdb/data_preproc_initial/train/0057_DC/FL_maps_rotated.nii.gz')
-fl_arr = fluence.get_fdata()[:,:,0]
-fl_aff = fluence.affine
-angle = 90
-
-header = FluenceHeader('/uz/data/radiotherapie/Shared/Data/LoesVdb/fluenceheaders/data_preproc_initial/train/0057_DC/FL_LAO30_header.txt')
-isocenter_position = header.iso
-
-FluenceRotator = ImageRotator2D(fl_arr, fl_aff, angle, isocenter_position)
-fl_arr_rotated, fl_aff_rotated = FluenceRotator.doInterpolation(1)
-
-nib.save(nib.Nifti1Image(fl_arr_rotated, fl_aff_rotated), '/uz/data/radiotherapie/Shared/Data/LoesVdb/data_preproc_initial/train/0057_DC/FL_TEST.nii.gz')
+from DICOMtoNIFTI.preprocessing import ImageResampling
+from DICOMtoNIFTI.preprocessing_gantryrotation import ImageRotator
 
 
-fixed_size = [160, 160, 160]
+preproc_data_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb'
+preproc_data_path_initial = os.path.join(preproc_data_path, 'data_preproc_initial')
+preproc_data_path_initial_train = os.path.join(preproc_data_path_initial, 'train')
 
-# dose kernel
+exporteclipse_data_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb'
+exporteclipse_data_path_initial = os.path.join(exporteclipse_data_path, 'export_initial_nonclinicaleclipse')
+exporteclipse_data_path_initial_train = os.path.join(exporteclipse_data_path_initial, 'train')
+
+input_size = [160, 160, 160] # determines the input size of the CNN
+
+name_beams = ['LAO30', 'RAO345', 'RAO320', 'RAO295', 'Re270', 'RPO245', 'RPO220', 'RPO195', 'LPO150'] # logische volgorde qua plaatsing rond patient
+gantry_angles = [30, 345, 320, 295, 270, 245, 220, 195, 150]
+
+# %% DOSE KERNEL
+
 '''
-dose = '/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/F_phantom_fluence_profile_lvdnbrz_test/'
-dose_path = os.path.join(dose, 'RTDOSE.dcm')
-nifti_generator = RTDoseVolume(dose_path)
-dose_arr = nifti_generator.get_data()
-dose_aff = nifti_generator.affine
-nifti_generator.SaveAsNifti(dose, dose_arr, dose_aff)
+dose_arr = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/F_phantom_fluence_profile_lvdnbrz_test', 'RTDOSE.nii.gz')).get_fdata()
+dose_aff = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/F_phantom_fluence_profile_lvdnbrz_test', 'RTDOSE.nii.gz')).affine
 
-field_size = 5 # mm
+field_size = 20 # mm
 pixdim = 2.5 # mm
 center_x = dose_arr.shape[0] // 2
 center_z = dose_arr.shape[2] // 2
 nb_pixels = int(field_size / pixdim) + 10 # 10 is margin for beam divergence
 
 dose_kernel = dose_arr[center_x - nb_pixels//2:center_x + nb_pixels//2, :, center_z - nb_pixels//2:center_z + nb_pixels//2]
-nib.save(nib.Nifti1Image(dose_kernel, dose_aff), os.path.join(dose, 'dose_kernel.nii.gz'))
+nib.save(nib.Nifti1Image(dose_kernel, dose_aff), os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/dose_kernel', 'dose_kernel.nii.gz'))
 '''
 
-dose = nib.load('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/F_phantom_fluence_profile_lvdnbrz_test/dose_kernel.nii.gz')
-dose_kernel = dose.get_fdata()
-dose_aff = dose.affine
+dose_kernel = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/dose_kernel', 'dose_kernel.nii.gz')).get_fdata()
+dose_aff = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/dose_kernel', 'dose_kernel.nii.gz')).affine
 
-eclipse_data_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data'
-train = 'train'
-validatie = 'validatie'
-test = 'test'
-initial = 'data_preproc_initial'
-adaptive = 'data_preproc_adaptive'
-
-eclipse_data_train_initial = os.path.join(eclipse_data_path, train)
-fluenceheaders = '/uz/data/radiotherapie/Shared/Data/LoesVdb/fluenceheaders/data_preproc_initial/train'
-
-
-'''
-fluenceheaders_data_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/train'
-fluenceheaders_save_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb/fluenceheaders/data_preproc_initial/train'
-if not os.path.exists(fluenceheaders_save_path):
-    os.makedirs(fluenceheaders_save_path)
-
-import shutil
-for path in os.listdir(fluenceheaders_data_path):
-
-    patient = path.replace('_FluencePred2_Lung_R2','')
-    print(patient)
-
-    save_path = os.path.join(fluenceheaders_save_path, patient)
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)  
-
-    for file in os.listdir(os.path.join(fluenceheaders_data_path, path)):
-        if file.endswith('_header.txt'):
-            shutil.move(os.path.join(fluenceheaders_data_path, path, file), os.path.join(save_path))
-
-'''
-
+# %% CREATE FLUENCE VOLUME
 
 # create fluence volume
-for path in os.listdir(eclipse_data_train_initial):
-
-    patient = path.replace('_FluencePred2_Lung_R2','')
+for patient in os.listdir(preproc_data_path_initial_train):
     print(patient)
 
-    fm = os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/data_preproc_initial/train', patient, 'FL_maps_rotated.nii.gz')
-    fm_arr = nib.load(fm).get_fdata()
-    fm_aff = nib.load(fm).affine
+    fl = os.path.join(preproc_data_path_initial_train, patient, 'FL_maps_rotated.nii.gz')
+    fl_arr = nib.load(fl).get_fdata()
+    fl_aff = nib.load(fl).affine
 
-    name_beams = ['LAO30', 'RAO345', 'RAO320', 'RAO295', 'Re270', 'RPO245', 'RPO220', 'RPO195', 'LPO150'] # logische volgorde qua plaatsing rond patient
-    gantry_angles = [30, 345, 320, 295, 270, 245, 220, 195, 150]
-
-    fluence_volume = np.zeros((165,dose_kernel.shape[1],165))
+    fl_volume_arr = np.zeros((fl_arr.shape[0],dose_kernel.shape[1],fl_arr.shape[1])) # initialize 
     slice_thickness = dose_aff[1,1]
 
-    for i in range(fm_arr.shape[2]):
+    for i in range(fl_arr.shape[2]):
 
-        fluence_2D = fm_arr[:,:,i]
+        fluence_2D = fl_arr[:,:,i]
+
+        header = FluenceHeader(os.path.join(exporteclipse_data_path_initial_train, patient, 'FL_' + name_beams[i] + '_header.txt'))
+        isocenterPosition = header.iso
+        collimatorAngle = header.colAngle
 
         # fluence map roteren volgens collimator angle
-        # in preprocessing is de fluence map geroteerd volgens collimatorangle om te passen in het coordinatensysteem van de BEV
-        # nu terug roteren om te passen in het coordinatensysteem van de CT (3D volume)
+        FluenceRotator2D = ImageRotator2D(fluence_2D, fl_aff, collimatorAngle, isocenterPosition)
+        fl_arr_rotated, fl_aff_rotated = FluenceRotator2D.doInterpolation(1)
+        # resamplen zodat alle fluence mappen dezelfde resolutie hebben
+        FluenceResampler = ImageResampling(fl_arr_rotated)
+        fl_arr_rotated, fl_aff_rotated = FluenceResampler.transform([fl_aff_rotated[0,0], fl_aff_rotated[1,1]], [2.5, 2.5], fl_aff_rotated, 1)
+        # bijknippen, want resampling maakt de fluence groter 
+        offset_x = int(np.round((fl_arr_rotated.shape[0] - 165) / 2))
+        offset_y = int(np.round((fl_arr_rotated.shape[1] - 165) / 2))
+        fl_arr_rotated = fl_arr_rotated[offset_x:offset_x + 165, offset_y:offset_y + 165]
 
-        
-        header = open(os.path.join(fluenceheaders, patient, 'FL_' + name_beams[i] + '_header.txt'), 'r')
-        for header_line in header.readlines():
-            if header_line.startswith('CollimatorAngle'):
-                collimatorAngle = float(header_line.split("\t")[1])
-
-        FluenceRotator = ImageRotator2D(fluence_2D, fm_aff, - collimatorAngle, isocenter_position)
-        fl_arr_rotated, fl_aff_rotated = FluenceRotator.doInterpolation(1)
-        
-
+        # stack fluences to create 3D volume
         fluence_3D = np.zeros((165,dose_kernel.shape[1], 165))
-        
         for y in range(dose_kernel.shape[1]):
             fluence_3D[:,y,:] = fl_arr_rotated
 
@@ -135,40 +92,62 @@ for path in os.listdir(eclipse_data_train_initial):
         new_aff[1,3] = fl_aff_rotated[2,3]
         new_aff[2,3] = fl_aff_rotated[1,3]
 
-        # take attenuation into account
-        # fluence_3D = scipy.ndimage.convolve(fluence_3D, dose_kernel)  
+        # take attenuation and beam divergence into account
         fluence_3D = fftconvolve(fluence_3D, dose_kernel, mode='same')
-        
-        save_path = os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient)
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        nib.save(nib.Nifti1Image(fluence_3D, new_aff), os.path.join(save_path, 'FL' + name_beams[i] + '_volume.nii.gz'))
+    
+        # save_path = os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient)
+        # if not os.path.exists(save_path):
+            # os.makedirs(save_path)
+        # nib.save(nib.Nifti1Image(fluence_3D, new_aff), os.path.join(save_path, 'FL' + name_beams[i] + '_volume.nii.gz'))
 
         # rotate according to gantry angle
-        # TO DO: ROTATE GAAT OOK AFFIENE MATRIX VERANDEREN, dus klopt nog niet helemaal
+        FluenceRotator3D = ImageRotator(fluence_3D, new_aff, - gantry_angles[i], isocenterPosition)
+        fl_arr_rotated_3D, fl_aff_rotated_3D = FluenceRotator3D.doInterpolation(1)
 
-        rotated_fluence_3D_arr = scipy.ndimage.rotate(fluence_3D, angle = gantry_angles[i], axes = (0,1), reshape = False)
-        nib.save(nib.Nifti1Image(rotated_fluence_3D_arr, new_aff), os.path.join(save_path, 'FL' + name_beams[i] + '_volume_rotated.nii.gz'))
+        # rotation changes dimensions
+        if fl_arr_rotated_3D.shape[0] < 165:
+            # pad x direction with zeros
+            offset_x = int(np.round((165 - fl_arr_rotated_3D.shape[0]) / 2))
+            fl_arr_rotated_3D = np.pad(fl_arr_rotated_3D, ((offset_x, 165 - fl_arr_rotated_3D.shape[0] - offset_x), (0,0), (0,0)), 'constant', constant_values = 0)
 
-        fluence_volume += rotated_fluence_3D_arr
+        if fl_arr_rotated_3D.shape[1] < dose_kernel.shape[1]:
+            offset_y = int(np.round((dose_kernel.shape[1] - fl_arr_rotated_3D.shape[1]) / 2))
+            fl_arr_rotated_3D = np.pad(fl_arr_rotated_3D, ((0,0), (offset_y, dose_kernel.shape[1] - fl_arr_rotated_3D.shape[1] - offset_y), (0,0)), 'constant', constant_values = 0)
 
-    # nog resamplen zodanig dat voxel size hetzelfde is van alle images
-    from  DICOMtoNIFTI.preprocessing import ImageResampling
-    Resampler = ImageResampling(fluence_volume)
-    voxel_spacing = [new_aff[0,0], new_aff[1,1], new_aff[2,2]]
-    print(voxel_spacing)
-    target_spacing = [2.5, 2.5, 2.5]
-    fluence_volume_resampled, fluence_volume_resampled_aff = Resampler.transform(voxel_spacing, target_spacing, new_aff, 1)
+        if fl_arr_rotated_3D.shape[2] < 165:
+            offset_z = int(np.round((165 - fl_arr_rotated_3D.shape[2]) / 2))
+            fl_arr_rotated_3D = np.pad(fl_arr_rotated_3D, ((0,0), (0,0), (offset_z, 165 - fl_arr_rotated_3D.shape[2] - offset_z)), 'constant', constant_values = 0)
 
-    nib.save(nib.Nifti1Image(fluence_volume_resampled, fluence_volume_resampled_aff), os.path.join(save_path, 'FL_maps_volume.nii.gz'))
+        offset_x = int(np.round((fl_arr_rotated_3D.shape[0] - 165) / 2))
+        offset_y = int(np.round((fl_arr_rotated_3D.shape[1] - dose_kernel.shape[1]) / 2))
+        offset_z = int(np.round((fl_arr_rotated_3D.shape[2] - 165) / 2))
 
-    fluence_volume = nib.load(os.path.join(save_path, 'FL_maps_volume.nii.gz'))
+        fl_arr_rotated_3D = fl_arr_rotated_3D[offset_x:offset_x + 165, offset_y:offset_y + dose_kernel.shape[1], offset_z:offset_z + 165]
+        # nib.save(nib.Nifti1Image(fl_arr_rotated_3D, fl_aff_rotated_3D), os.path.join(save_path, 'FL' + name_beams[i] + '_volume_rotated.nii.gz'))
 
-    # reshape fluence volume so that all inputs have the same size
-    rtplan_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb/export_initial_nonclinicaleclipse/train' 
-    dcmheader = pydicom.dcmread(os.path.join(rtplan_path, patient, 'RTPLAN.dcm'))
-    iso = dcmheader.BeamSequence[0].ControlPointSequence[0].IsocenterPosition # world coordinates?
+        fl_volume_arr += fl_arr_rotated_3D
 
+    # change affine matrix of the volume 
+    # the center of the image should coincide with the isocenter of the plan  --- vragen aan Wouter
+    rtplan = pydicom.dcmread(os.path.join(exporteclipse_data_path_initial_train, patient, 'RTPLAN.dcm'))
+    iso = rtplan.BeamSequence[0].ControlPointSequence[0].IsocenterPosition
+
+    center_x = fl_volume_arr.shape[0] // 2
+    center_y = fl_volume_arr.shape[1] // 2
+    center_z = fl_volume_arr.shape[2] // 2
+
+    fl_volume_aff = np.eye(4)
+    fl_volume_aff[0,0] = fl_aff[0,0]
+    fl_volume_aff[1,1] = slice_thickness
+    fl_volume_aff[2,2] = fl_aff[1,1]
+    fl_volume_aff[0,3] = iso[0] - center_x * fl_volume_aff[0,0]
+    fl_volume_aff[1,3] = iso[1] - center_y * fl_volume_aff[1,1]
+    fl_volume_aff[2,3] = iso[2] - center_z * fl_volume_aff[2,2]
+
+    nib.save(nib.Nifti1Image(fl_volume_arr, fl_volume_aff), os.path.join(preproc_data_path_initial_train, patient, 'FL_maps_volume.nii.gz'))
+    fl_volume = nib.load(os.path.join(preproc_data_path_initial_train, patient, 'FL_maps_volume.nii.gz'))
+
+    # center image around center of mass of target volume (isocenter) and crop to fixed size (PhD Siri Willems)
     iso_x = iso[0] # isocenter of the plan, in world coordinates
     iso_y = iso[1]
     iso_z = iso[2]
@@ -184,59 +163,37 @@ for path in os.listdir(eclipse_data_train_initial):
     iso_fluence =  [int(np.round((iso_x - x_img) / delta_x)),
                 int(np.round((iso_y - y_img) / delta_y)), 
                 int(np.round((iso_z - z_img) / delta_z))] # where does iso lay in fluence volume
+    
+    if iso_fluence[0] < input_size[0] // 2:
+        iso_fluence[0] = input_size[0] // 2
+    if iso_fluence[1] < input_size[1] // 2:
+        iso_fluence[1] = input_size[1] // 2
+    if iso_fluence[2] < input_size[2] // 2:    
+        iso_fluence[2] = input_size[2] // 2
 
-    if iso_fluence[0] < fixed_size[0] // 2:
-        # print(' x van patient', patient)
-        iso_fluence[0] = fixed_size[0] // 2
-    if iso_fluence[1] < fixed_size[1] // 2:
-        # print(' y van patient', patient)
-        iso_fluence[1] = fixed_size[1] // 2
-    if iso_fluence[2] < fixed_size[2] // 2:    
-        # print(' z van patient', patient)
-        iso_fluence[2] = fixed_size[2] // 2
+    fl_volume = fl_volume.slicer[iso_fluence[0] - input_size[0] // 2 : iso_fluence[0] + input_size[0] // 2,
+                            iso_fluence[1] - input_size[1] // 2 : iso_fluence[1] + input_size[1] // 2, 
+                            iso_fluence[2] - input_size[2] // 2 : iso_fluence[2] + input_size[2] // 2]
 
-    fluence_volume_reshaped = fluence_volume.slicer[iso_fluence[0] - fixed_size[0] // 2 : iso_fluence[0] + fixed_size[0] // 2,
-                            iso_fluence[1] - fixed_size[1] // 2 : iso_fluence[1] + fixed_size[1] // 2, 
-                            iso_fluence[2] - fixed_size[2] // 2 : iso_fluence[2] + fixed_size[2] // 2]
+    nib.save(fl_volume, os.path.join(preproc_data_path_initial_train, patient, 'FL_maps_volume_reshaped.nii.gz'))
 
-    nib.save(fluence_volume_reshaped, os.path.join(save_path, 'FL_maps_volume_reshaped.nii.gz'))
-
-
-    # ct = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/export_initial_nonclinicaleclipse/train', patient, 'CT_ED.nii.gz'))
-    # ct_arr = ct.get_fdata()
-    # ct_aff = ct.affine
-
-    # fluence eens reformatten, zodat in dezelfde dimensies als de ct
-    # reformatter = Reformatter3DTo3D(fluence_volume_reshaped.get_fdata(), fluence_volume_reshaped.affine, ct_arr, ct_aff)
-    # fluence_volume_reformat_arr, fluence_volume_reformat_aff = reformatter.Interpollate()
-    # nib.save(nib.Nifti1Image(fluence_volume_reformat_arr, fluence_volume_reformat_aff), os.path.join(save_path, 'FL_maps_volume_reformat.nii.gz'))
-
-
-# create dose volume (.dcm to .nii.gz)
-# preprocess dose
-# center image around the center of mass of the target volume & crop it to a fixed size
-
-for path in os.listdir(eclipse_data_train_initial):
-
-    patient = path.replace('_FluencePred2_Lung_R2','')
+# %% CREATE DOSE VOLUME
+for patient in os.listdir(exporteclipse_data_path_initial_train):
     print(patient)
 
-    # dose = os.path.join(eclipse_data_train_initial, patient + '_FluencePred2_Lung_R2', 'RTDOSE.dcm')
-    # nifti_generator = RTDoseVolume(dose)
-    # dose_arr = nifti_generator.get_data()
-    # dose_aff = nifti_generator.affine
+    dose = os.path.join(exporteclipse_data_path_initial_train, patient, 'RTDOSE.dcm')
+    nifti_generator = RTDoseVolume(dose)
+    dose_arr = nifti_generator.get_data()
+    dose_aff = nifti_generator.affine
+    nib.save(nib.Nifti1Image(dose_arr, dose_aff), os.path.join(exporteclipse_data_path_initial_train, patient, 'RTDOSE.nii.gz'))
 
+    dose = nib.load(os.path.join(exporteclipse_data_path_initial_train, patient, 'RTDOSE.nii.gz'))
+    dose_aff = dose.affine
 
-    # tijdelijk save path, ik moet nog een betere manier vinden om de data te organiseren
-    # nifti_generator.SaveAsNifti(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient), dose_arr, dose_aff)
+    rtplan = pydicom.dcmread(os.path.join(exporteclipse_data_path_initial_train, patient, 'RTPLAN.dcm'))
+    iso = rtplan.BeamSequence[0].ControlPointSequence[0].IsocenterPosition # world coordinates?
 
-    dose = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient, 'RTDOSE.nii.gz'))
-    # print(dose.shape)
-
-    rtplan_path = '/uz/data/radiotherapie/Shared/Data/LoesVdb/export_initial_nonclinicaleclipse/train' 
-    dcmheader = pydicom.dcmread(os.path.join(rtplan_path, patient, 'RTPLAN.dcm'))
-    iso = dcmheader.BeamSequence[0].ControlPointSequence[0].IsocenterPosition # world coordinates?
-
+    # center image around center of mass of target volume (isocenter) and crop to fixed size (PhD Siri Willems)
     iso_x = iso[0] # isocenter of the plan, in world coordinates
     iso_y = iso[1]
     iso_z = iso[2]
@@ -252,28 +209,22 @@ for path in os.listdir(eclipse_data_train_initial):
     iso_dose =  [int(np.round((iso_x - x_img) / delta_x)),
                 int(np.round((iso_y - y_img) / delta_y)), 
                 int(np.round((iso_z - z_img) / delta_z))]
-    # print(iso_dose)
 
-    # center image around iso (center of mass of target volume) and crop to fixed size
+    if iso_dose[0] < input_size[0] // 2:
+        iso_dose[0] = input_size[0] // 2
+    if iso_dose[1] < input_size[1] // 2:
+        iso_dose[1] = input_size[1] // 2
+    if iso_dose[2] < input_size[2] // 2:    
+        iso_dose[2] = input_size[2] // 2
 
-    if iso_dose[0] < fixed_size[0] // 2:
-        # print(' x van patient', patient)
-        iso_dose[0] = fixed_size[0] // 2
-    if iso_dose[1] < fixed_size[1] // 2:
-        # print(' y van patient', patient)
-        iso_dose[1] = fixed_size[1] // 2
-    if iso_dose[2] < fixed_size[2] // 2:    
-        # print(' z van patient', patient)
-        iso_dose[2] = fixed_size[2] // 2
+    dose_reshaped = dose.slicer[iso_dose[0] - input_size[0] // 2 : iso_dose[0] + input_size[0] // 2,
+                            iso_dose[1] - input_size[1] // 2 : iso_dose[1] + input_size[1] // 2, 
+                            iso_dose[2] - input_size[2] // 2 : iso_dose[2] + input_size[2] // 2]
 
-    dose_reshaped = dose.slicer[iso_dose[0] - fixed_size[0] // 2 : iso_dose[0] + fixed_size[0] // 2,
-                            iso_dose[1] - fixed_size[1] // 2 : iso_dose[1] + fixed_size[1] // 2, 
-                            iso_dose[2] - fixed_size[2] // 2 : iso_dose[2] + fixed_size[2] // 2]
-    # print(dose_reshaped.shape)
+    nib.save(dose_reshaped, os.path.join(preproc_data_path_initial_train, patient, 'RTDOSE_reshaped.nii.gz'))
 
-    # nib.save(nib.Nifti1Image(dose_reshaped, dose_aff), os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient, 'RTDOSE_reshaped.nii.gz'))
-    nib.save(dose_reshaped, os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient, 'RTDOSE_reshaped.nii.gz'))
-
+    '''
+    # processing output of network
     ct = nib.load(os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/export_initial_nonclinicaleclipse/train', patient, 'CT_ED.nii.gz'))
 
     dose_aff = dose_reshaped.affine
@@ -285,3 +236,4 @@ for path in os.listdir(eclipse_data_train_initial):
     reformatter = Reformatter3DTo3D(dose_arr, dose_aff, ct_arr, ct_aff)
     dose_reformat_arr, dose_reformat_aff = reformatter.Interpollate()
     nib.save(nib.Nifti1Image(dose_reformat_arr, dose_reformat_aff), os.path.join('/uz/data/radiotherapie/Shared/Data/LoesVdb/eclipse_data/fluence_volume_data', patient, 'RTDOSE_reformat.nii.gz'))
+    '''
